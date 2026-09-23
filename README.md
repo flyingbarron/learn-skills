@@ -50,12 +50,8 @@ learn-skills/
 │       │   └── web-browse.mjs                 <- DuckDuckGo + GitHub fallback + rank + cache
 │       ├── airgap-validator/
 │       │   └── SKILL.md                       <- Artifact validation before airgap deploy
-│       ├── security-review/
-│       │   └── SKILL.md                       <- Code security review (6 categories)
-│       ├── pizza/
-│       │   └── SKILL.md                       <- Pizza dough expert (community skill)
-│       └── excel-financial-report/
-│           └── SKILL.md                       <- Excel financial report builder (generated)
+│       └── security-review/
+│           └── SKILL.md                       <- Code security review (6 categories)
 │
 └── docs/
     ├── skills-guide.md                        <- General guide to building Skills
@@ -91,7 +87,7 @@ learn-skills/
 
 ### 2. `web-browse` — Search and Ranking
 
-**What it does:** DuckDuckGo search + GitHub fallback + repo scoring.
+**What it does:** DuckDuckGo search + GitHub fallback + Brave Search fallback + repo scoring.
 
 ```bash
 # Search
@@ -124,6 +120,136 @@ unauthorized URLs, hardcoded credentials, or remote-exec patterns before deploym
 ```bash
 node .bob/skills/code-awareness/skill-security-verifier.mjs <path-to-artifact>
 ```
+
+---
+
+## 🔍 Web Search Alternatives
+
+The `web-browse` skill uses a **3-engine fallback chain**. Below is the full menu of options —
+from fully free and keyless to enterprise-grade paid APIs — so you can choose the one that fits
+your volume and privacy requirements.
+
+### Current Setup (built-in, no changes needed)
+
+| # | Engine | Cost | Limit | Notes |
+|---|--------|------|-------|-------|
+| 1 | **DuckDuckGo HTML scrape** | Free, no key | Unofficial — rate-limited at high volume | Primary engine; no signup required |
+| 2 | **GitHub Search API** | Free, no key | 10 req/min (unauthenticated), 30/min (token) | Auto-fallback; repo-level results only |
+| 3 | **Brave Search API** | Free tier: 2,000 req/month | Paid tiers available | Full web index; free tier needs no CC |
+
+### Free Alternatives You Can Add
+
+| Engine | Free Tier | Key Required | Notes |
+|--------|-----------|-------------|-------|
+| [**SerpApi**](https://serpapi.com) | 100 searches/month | Yes | Google/Bing/DDG results; easy REST API |
+| [**Serper.dev**](https://serper.dev) | 2,500 searches free (one-time) | Yes | Google results; very fast; JSON only |
+| [**Tavily**](https://tavily.com) | 1,000 searches/month | Yes | Optimised for AI agents; returns summaries |
+| [**OpenSERP**](https://github.com/karust/openserp) | Unlimited (self-hosted) | No | Open-source; Docker; Google + Bing + DDG |
+| [**FreeSerp**](https://freeserp.ai) | Unlimited (own index) | No | Keyless REST API; 3.1B-page index |
+| [**You.com API**](https://documentation.you.com) | Free tier available | Yes | Web + code + news search for AI |
+
+### Paid / Enterprise Options
+
+| Engine | Starting Price | Notes |
+|--------|---------------|-------|
+| [**Google Custom Search API**](https://developers.google.com/custom-search/v1/overview) | $5 / 1,000 queries | Official Google results; JSON API |
+| [**Bing Web Search API**](https://www.microsoft.com/en-us/bing/apis/bing-web-search-api) | $3 / 1,000 queries | Microsoft; broad coverage |
+| [**SerpApi Pro**](https://serpapi.com/pricing) | $50/month (5,000 searches) | All major engines; high reliability |
+| [**Brave Search API — Pro**](https://brave.com/search/api) | $3 / 1,000 queries | Independent index; privacy-first |
+| [**Exa (formerly Metaphor)**](https://exa.ai) | $1 / 1,000 results | Neural search; best for AI/LLM use-cases |
+
+---
+
+## ⚙️ How to Add or Switch a Search Engine
+
+All search logic lives in one file:
+
+```
+.bob/skills/web-browse/web-browse.mjs
+```
+
+### Step 1 — Add your API key as an environment variable
+
+```powershell
+# PowerShell — current session only
+$env:BRAVE_SEARCH_API_KEY = "BSA..."
+$env:SERPER_API_KEY        = "abc123..."
+$env:TAVILY_API_KEY        = "tvly-..."
+
+# PowerShell — permanent (user scope)
+[System.Environment]::SetEnvironmentVariable("SERPER_API_KEY", "abc123...", "User")
+```
+
+```bash
+# macOS / Linux
+export SERPER_API_KEY="abc123..."
+export TAVILY_API_KEY="tvly-..."
+```
+
+### Step 2 — Add a new search function in `web-browse.mjs`
+
+Open `.bob/skills/web-browse/web-browse.mjs` and add your engine function
+**after the existing `searchBrave` function** (around line 272):
+
+```js
+// ---------------------------------------------------------------------------
+// Optional: Serper.dev — Google results via REST (2,500 free searches on signup)
+// Requires SERPER_API_KEY env var.  Skipped silently when key is absent.
+// Sign up: https://serper.dev
+// ---------------------------------------------------------------------------
+async function searchSerper(query) {
+  const apiKey = process.env.SERPER_API_KEY;
+  if (!apiKey) return [];
+
+  const body = JSON.stringify({ q: query, num: 8 });
+  // Note: Serper uses HTTPS POST — wrap in a small helper if needed
+  const apiUrl = `https://google.serper.dev/search`;
+  try {
+    const json = await fetchWithRetry(apiUrl, {
+      'Content-Type': 'application/json',
+      'X-API-KEY': apiKey
+    }, body);
+    const data = JSON.parse(json);
+    return (data.organic ?? []).slice(0, 8).map(r => ({
+      url: r.link,
+      snippet: r.snippet || r.title || ''
+    }));
+  } catch {
+    return [];
+  }
+}
+```
+
+> **Note:** `fetchUrl` only does GET requests. For POST-based APIs (Serper, Tavily),
+> add a small `postUrl(url, body, headers)` helper that uses `https.request` with
+> `method: 'POST'` — the existing `fetchUrl` pattern is easy to extend (see line 88).
+
+### Step 3 — Wire it into the fallback chain
+
+Find the `searchWithFallback` function (around line 274) and add your engine
+**as the last fallback** before the `engine: 'none'` return:
+
+```js
+async function searchWithFallback(query) {
+  // ... existing DuckDuckGo + GitHub + Brave logic ...
+
+  // NEW: add Serper as a 4th fallback
+  const serperResults = await searchSerper(query);
+  if (serperResults.length > 0) {
+    return { engine: 'serper', results: serperResults, count: serperResults.length, cached: false };
+  }
+
+  return { engine: 'none', results: [], count: 0, cached: false };
+}
+```
+
+### Step 4 — Test
+
+```bash
+node .bob/skills/web-browse/web-browse.mjs search "datastage skill SKILL.md github IBM"
+```
+
+The output will include `"engine": "serper"` (or whichever engine responded) confirming the new backend is active.
 
 ---
 
